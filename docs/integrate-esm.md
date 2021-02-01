@@ -1,8 +1,8 @@
 ## Integrating the ESM version of the Monaco Editor
 
 - [Webpack](#using-webpack)
-  - [Option 1](#option-1-using-the-monaco-editor-loader-plugin)
-  - [Option 2](#option-2-using-plain-webpack)
+  - [Option 1: Using the Monaco Editor Loader Plugin](#option-1-using-the-monaco-editor-loader-plugin)
+  - [Option 2: Using plain webpack](#option-2-using-plain-webpack)
 - [Parcel](#using-parcel)
 
 ### Using webpack
@@ -46,6 +46,9 @@ module.exports = {
     rules: [{
       test: /\.css$/,
       use: ['style-loader', 'css-loader']
+    }, {
+      test: /\.ttf$/,
+      use: ['file-loader']
     }]
   },
   plugins: [
@@ -57,6 +60,8 @@ module.exports = {
 ---
 
 ### Option 2: Using plain webpack
+
+Full working samples are available at https://github.com/Microsoft/monaco-editor-samples/tree/master/browser-esm-webpack or https://github.com/Microsoft/monaco-editor-samples/tree/master/browser-esm-webpack-small
 
 * `index.js`
 ```js
@@ -70,10 +75,10 @@ self.MonacoEnvironment = {
     if (label === 'json') {
       return './json.worker.bundle.js';
     }
-    if (label === 'css') {
+    if (label === 'css' || label === 'scss' || label === 'less') {
       return './css.worker.bundle.js';
     }
-    if (label === 'html') {
+    if (label === 'html' || label === 'handlebars' || label === 'razor') {
       return './html.worker.bundle.js';
     }
     if (label === 'typescript' || label === 'javascript') {
@@ -116,6 +121,9 @@ module.exports = {
     rules: [{
       test: /\.css$/,
       use: ['style-loader', 'css-loader']
+    }, {
+      test: /\.ttf$/,
+      use: ['file-loader']
     }]
   }
 };
@@ -124,6 +132,8 @@ module.exports = {
 ---
 
 ### Using parcel
+
+A full working sample is available at https://github.com/Microsoft/monaco-editor-samples/tree/master/browser-esm-parcel
 
 When using parcel, we need to use the `getWorkerUrl` function and build the workers seperately from our main source. To simplify things, we can write a tiny bash script to build the workers for us.
 
@@ -134,18 +144,18 @@ import * as monaco from 'monaco-editor';
 self.MonacoEnvironment = {
   getWorkerUrl: function(moduleId, label) {
     if (label === 'json') {
-      return './json.worker.bundle.js';
+      return './json.worker.js';
     }
-    if (label === 'css') {
-      return './css.worker.bundle.js';
+    if (label === 'css' || label === 'scss' || label === 'less') {
+      return './css.worker.js';
     }
-    if (label === 'html') {
-      return './html.worker.bundle.js';
+    if (label === 'html' || label === 'handlebars' || label === 'razor') {
+      return './html.worker.js';
     }
     if (label === 'typescript' || label === 'javascript') {
-      return './ts.worker.bundle.js';
+      return './ts.worker.js';
     }
-    return './editor.worker.bundle.js';
+    return './editor.worker.js';
   },
 };
 

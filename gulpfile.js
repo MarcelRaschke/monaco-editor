@@ -7,7 +7,8 @@ const fs = require('fs');
 const rimraf = require('rimraf');
 const cp = require('child_process');
 const os = require('os');
-const httpServer = require('http-server');
+const yaserver = require('yaserver');
+const http = require('http');
 const typedoc = require("gulp-typedoc");
 const CleanCSS = require('clean-css');
 const uncss = require('uncss');
@@ -26,8 +27,46 @@ const MONACO_EDITOR_VERSION = (function() {
 	return version;
 })();
 
-gulp.task('clean-release', function(cb) { rimraf('release', { maxBusyTries: 1 }, cb); });
-gulp.task('release', ['clean-release'], function() {
+async function _execute(task) {
+	// Always invoke as if it were a callback task
+	return new Promise((resolve, reject) => {
+		if (task.length === 1) {
+			// this is a calback task
+			task((err) => {
+				if (err) {
+					return reject(err);
+				}
+				resolve();
+			});
+			return;
+		}
+		const taskResult = task();
+		if (typeof taskResult === 'undefined') {
+			// this is a sync task
+			resolve();
+			return;
+		}
+		if (typeof taskResult.then === 'function') {
+			// this is a promise returning task
+			taskResult.then(resolve, reject);
+			return;
+		}
+		// this is a stream returning task
+		taskResult.on('end', _ => resolve());
+		taskResult.on('error', err => reject(err));
+	});
+}
+
+function taskSeries(...tasks) {
+	return async () => {
+		for (let i = 0; i < tasks.length; i++) {
+			await _execute(tasks[i]);
+		}
+	};
+}
+
+const cleanReleaseTask = function(cb) { rimraf('release', { maxBusyTries: 1 }, cb); };
+gulp.task('release', taskSeries(cleanReleaseTask, function() {
 	return es.merge(
 
 		// dev folder
@@ -44,7 +83,7 @@ gulp.task('release', ['clean-release'], function() {
 			.pipe(es.through(function(data) {
 				var json = JSON.parse(data.contents.toString());
 				json.private = false;
-				data.contents = new Buffer(JSON.stringify(json, null, '  '));
+				data.contents = Buffer.from(JSON.stringify(json, null, '  '));
 				this.emit('data', data);
 			}))
 			.pipe(gulp.dest('release')),
@@ -53,7 +92,8 @@ gulp.task('release', ['clean-release'], function() {
 			.pipe(gulp.dest('release')),
 
 		// min-maps folder
-		gulp.src('node_modules/monaco-editor-core/min-maps/**/*').pipe(gulp.dest('release/min-maps')),
+		gulp.src('node_modules/monaco-editor-core/min-maps/**/*')
+			.pipe(gulp.dest('release/min-maps')),
 
 		// other files
 		gulp.src([
@@ -66,7 +106,7 @@ gulp.task('release', ['clean-release'], function() {
 		.pipe(addPluginThirdPartyNotices())
 		.pipe(gulp.dest('release'))
 	)
-});
+}));
 
 /**
  * Release to `dev` or `min`.
@@ -76,6 +116,7 @@ function releaseOne(type) {
 		gulp.src('node_modules/monaco-editor-core/' + type + '/**/*')
 			.pipe(addPluginContribs(type))
 			.pipe(gulp.dest('release/' + type)),
+
 		pluginStreams(type, 'release/' + type + '/')
 	)
 }
@@ -110,7 +151,7 @@ function pluginStream(plugin, type, destinationPath) {
 
 			let contents = data.contents.toString();
 			contents = contents.replace('define(["require", "exports"],', 'define(["require", "exports", "vs/editor/editor.api"],');
-			data.contents = new Buffer(contents);
+			data.contents = Buffer.from(contents);
 			this.emit('data', data);
 		}))
 		.pipe(gulp.dest(destinationPath + plugin.modulePrefix))
@@ -143,48 +184,9 @@ function addPluginContribs(type) {
 			var contribPath = path.join(__dirname, pluginPath, plugin.contrib.substr(plugin.modulePrefix.length)) + '.js';
 			var contribContents = fs.readFileSync(contribPath).toString();
 
-			// Check for the anonymous define call case 1
-			// transform define(function() {...}) to define("moduleId",["require"],function() {...})
-			var anonymousContribDefineCase1 = contribContents.indexOf('define(function');
-			if (anonymousContribDefineCase1 >= 0) {
-				contribContents = (
-					contribContents.substring(0, anonymousContribDefineCase1)
-					+ `define("${plugin.contrib}",["require"],function`
-					+ contribContents.substring(anonymousContribDefineCase1 + 'define(function'.length)
-				);
-			}
-
-			// Check for the anonymous define call case 2
-			// transform define([ to define("moduleId",[
-			var anonymousContribDefineCase2 = contribContents.indexOf('define([');
-			if (anonymousContribDefineCase2 >= 0) {
-				contribContents = (
-					contribContents.substring(0, anonymousContribDefineCase2)
-					+ `define("${plugin.contrib}",[`
-					+ contribContents.substring(anonymousContribDefineCase2 + 'define(['.length)
-				);
-			}
-
-			var contribDefineIndex = contribContents.indexOf('define("' + plugin.contrib);
-			if (contribDefineIndex === -1) {
-				contribDefineIndex = contribContents.indexOf('define(\'' + plugin.contrib);
-				if (contribDefineIndex === -1) {
-					console.error('(1) CANNOT DETERMINE AMD define location for contribution', pluginPath);
-					process.exit(-1);
-				}
-			}
-
-			var depsEndIndex = contribContents.indexOf(']', contribDefineIndex);
-			if (contribDefineIndex === -1) {
-				console.error('(2) CANNOT DETERMINE AMD define location for contribution', pluginPath);
-				process.exit(-1);
-			}
-
-			contribContents = contribContents.substring(0, depsEndIndex) + ',"vs/editor/editor.api"' + contribContents.substring(depsEndIndex);
-
 			contribContents = contribContents.replace(
-				'define("vs/basic-languages/_.contribution",["require","exports"],',
-				'define("vs/basic-languages/_.contribution",["require","exports","vs/editor/editor.api"],',
+				/define\((['"][a-z\/\-]+\/fillers\/monaco-editor-core['"]),\[\],/,
+				'define($1,[\'vs/editor/editor.api\'],'
 			);
 
 			extraContent.push(contribContents);
@@ -197,7 +199,7 @@ function addPluginContribs(type) {
 		}
 		contents = contents.substring(0, insertIndex) + '\n' + extraContent.join('\n') + '\n' + contents.substring(insertIndex);
 
-		data.contents = new Buffer(contents);
+		data.contents = Buffer.from(contents);
 		this.emit('data', data);
 	});
 }
@@ -212,6 +214,7 @@ function ESM_release() {
 			.pipe(ESM_addImportSuffix())
 			.pipe(ESM_addPluginContribs('release/esm'))
 			.pipe(gulp.dest('release/esm')),
+
 		ESM_pluginStreams('release/esm/')
 	)
 }
@@ -249,7 +252,7 @@ function ESM_pluginStream(plugin, destinationPath) {
 
 			const info = ts.preProcessFile(contents);
 			for (let i = info.importedFiles.length - 1; i >= 0; i--) {
-				const importText = info.importedFiles[i].fileName;
+				let importText = info.importedFiles[i].fileName;
 				const pos = info.importedFiles[i].pos;
 				const end = info.importedFiles[i].end;
 
@@ -258,6 +261,10 @@ function ESM_pluginStream(plugin, destinationPath) {
 					if (!/^monaco-editor-core/.test(importText)) {
 						console.error(`Non-relative import for unknown module: ${importText} in ${data.path}`);
 						process.exit(0);
+					}
+
+					if (importText === 'monaco-editor-core') {
+						importText = 'monaco-editor-core/esm/vs/editor/editor.api';
 					}
 
 					const myFileDestPath = path.join(DESTINATION, plugin.modulePrefix, data.relative);
@@ -275,7 +282,9 @@ function ESM_pluginStream(plugin, destinationPath) {
 				}
 			}
 
-			data.contents = new Buffer(contents);
+			contents = contents.replace(/\/\/# sourceMappingURL=.*((\r?\n)|$)/g, '');
+
+			data.contents = Buffer.from(contents);
 			this.emit('data', data);
 		}))
 		.pipe(es.through(function(data) {
@@ -297,7 +306,7 @@ function ESM_pluginStream(plugin, destinationPath) {
 				contents
 			);
 
-			data.contents = new Buffer(contents);
+			data.contents = Buffer.from(contents);
 
 			this.emit('data', data);
 		}))
@@ -332,7 +341,7 @@ function ESM_addImportSuffix() {
 			);
 		}
 
-		data.contents = new Buffer(contents);
+		data.contents = Buffer.from(contents);
 		this.emit('data', data);
 	});
 }
@@ -376,7 +385,7 @@ function ESM_addPluginContribs(dest) {
 		this.emit('data', new File({
 			path: data.path,
 			base: data.base,
-			contents: new Buffer(mainFileContents)
+			contents: Buffer.from(mainFileContents)
 		}));
 	});
 }
@@ -399,7 +408,7 @@ function addPluginDTS() {
 			var dtsPath = path.join(pluginPath, '../monaco.d.ts');
 			try {
 				let plugindts = fs.readFileSync(dtsPath).toString();
-				plugindts = plugindts.replace('declare module', 'declare namespace');
+				plugindts = plugindts.replace(/\/\/\/ <reference.*\n/m, '');
 				extraContent.push(plugindts);
 			} catch (err) {
 				return;
@@ -409,7 +418,7 @@ function addPluginDTS() {
 		contents = [
 			'/*!-----------------------------------------------------------',
 			' * Copyright (c) Microsoft Corporation. All rights reserved.',
-			' * Type definitions for monaco-editor v'+MONACO_EDITOR_VERSION,
+			' * Type definitions for monaco-editor',
 			' * Released under the MIT license',
 			'*-----------------------------------------------------------*/',
 		].join('\n') + '\n' + contents + '\n' + extraContent.join('\n');
@@ -417,12 +426,12 @@ function addPluginDTS() {
 		// Ensure consistent indentation and line endings
 		contents = cleanFile(contents);
 
-		data.contents = new Buffer(contents);
+		data.contents = Buffer.from(contents);
 
 		this.emit('data', new File({
 			path: path.join(path.dirname(data.path), 'esm/vs/editor/editor.api.d.ts'),
 			base: data.base,
-			contents: new Buffer(toExternalDTS(contents))
+			contents: Buffer.from(toExternalDTS(contents))
 		}));
 
 		fs.writeFileSync('website/playground/monaco.d.ts.txt', contents);
@@ -432,7 +441,7 @@ function addPluginDTS() {
 }
 
 function toExternalDTS(contents) {
-	let lines = contents.split('\n');
+	let lines = contents.split(/\r\n|\r|\n/);
 	let killNextCloseCurlyBrace = false;
 	for (let i = 0; i < lines.length; i++) {
 		let line = lines[i];
@@ -462,8 +471,13 @@ function toExternalDTS(contents) {
 		if (line.indexOf('declare namespace monaco.') === 0) {
 			lines[i] = line.replace('declare namespace monaco.', 'export namespace ');
 		}
+
+		if (line.indexOf('declare let MonacoEnvironment') === 0) {
+			lines[i] = `declare global {\n    let MonacoEnvironment: Environment | undefined;\n}`;
+			// lines[i] = line.replace('declare namespace monaco.', 'export namespace ');
+		}
 	}
-	return lines.join('\n');
+	return lines.join('\n').replace(/\n\n\n+/g, '\n\n');
 }
 
 /**
@@ -509,7 +523,7 @@ function addPluginThirdPartyNotices() {
 		});
 
 		contents += '\n' + extraContent.join('\n');
-		data.contents = new Buffer(contents);
+		data.contents = Buffer.from(contents);
 
 		this.emit('data', data);
 	});
@@ -517,11 +531,34 @@ function addPluginThirdPartyNotices() {
 
 
 // --- website
-
-gulp.task('clean-website', function(cb) { rimraf('../monaco-editor-website', { maxBusyTries: 1 }, cb); });
-gulp.task('build-website', ['clean-website'], function() {
-
+function typedocStream() {
 	const initialCWD = process.cwd();
+	// TypeDoc is silly and consumes the `exclude` option.
+	// This option does not make it to typescript compiler, which ends up including /node_modules/ .d.ts files.
+	// We work around this by changing the cwd... :O
+	return gulp.src('monaco.d.ts')
+	.pipe(es.through(undefined, function() {
+		process.chdir(os.tmpdir());
+		this.emit('end');
+	}))
+	.pipe(typedoc({
+		mode: 'file',
+		out: path.join(__dirname, '../monaco-editor-website/api'),
+		includeDeclarations: true,
+		theme: path.join(__dirname, 'website/typedoc-theme'),
+		entryPoint: 'monaco',
+		name: 'Monaco Editor API v' + MONACO_EDITOR_VERSION,
+		readme: 'none',
+		hideGenerator: true
+	}))
+	.pipe(es.through(undefined, function() {
+		process.chdir(initialCWD);
+		this.emit('end');
+	}))
+};
+gulp.task('typedoc', () => typedocStream());
+const cleanWebsiteTask = function(cb) { rimraf('../monaco-editor-website', { maxBusyTries: 1 }, cb); };
+const buildWebsiteTask = taskSeries(cleanWebsiteTask, function() {
 
 	function replaceWithRelativeResource(dataPath, contents, regex, callback) {
 		return contents.replace(regex, function(_, m0) {
@@ -547,7 +584,7 @@ gulp.task('build-website', ['clean-website'], function() {
 				var contents = data.contents.toString();
 				contents = contents.replace(/\.\.\/release\/dev/g, 'node_modules/monaco-editor/min');
 				contents = contents.replace(/{{version}}/g, MONACO_EDITOR_VERSION);
-				// contents = contents.replace('&copy; 2017 Microsoft', '&copy; 2017 Microsoft [' + builtTime + ']');
+				contents = contents.replace(/{{year}}/g, new Date().getFullYear());
 
 				// Preload xhr contents
 				contents = replaceWithRelativeResource(data.path, contents, /<pre data-preload="([^"]+)".*/g, function(m0, fileContents) {
@@ -600,7 +637,7 @@ gulp.task('build-website', ['clean-website'], function() {
 						return '<script>' + fileContents.toString('utf8') + '</script>';
 					});
 
-					data.contents = new Buffer(contents.split(/\r\n|\r|\n/).join('\n'));
+					data.contents = Buffer.from(contents.split(/\r\n|\r|\n/).join('\n'));
 					this.emit('data', data);
 
 					if (done && waiting === 0) {
@@ -616,29 +653,7 @@ gulp.task('build-website', ['clean-website'], function() {
 			}))
 			.pipe(gulp.dest('../monaco-editor-website')),
 
-			// TypeDoc is silly and consumes the `exclude` option.
-			// This option does not make it to typescript compiler, which ends up including /node_modules/ .d.ts files.
-			// We work around this by changing the cwd... :O
-
-			gulp.src('monaco.d.ts')
-			.pipe(es.through(undefined, function() {
-				process.chdir(os.tmpdir());
-				this.emit('end');
-			}))
-			.pipe(typedoc({
-				mode: 'file',
-				out: path.join(__dirname, '../monaco-editor-website/api'),
-				includeDeclarations: true,
-				theme: path.join(__dirname, 'website/typedoc-theme'),
-				entryPoint: 'monaco',
-				name: 'Monaco Editor API v' + MONACO_EDITOR_VERSION,
-				readme: 'none',
-				hideGenerator: true
-			}))
-			.pipe(es.through(undefined, function() {
-				process.chdir(initialCWD);
-				this.emit('end');
-			}))
+			typedocStream()
 		)
 
 		.pipe(es.through(function(data) {
@@ -651,15 +666,16 @@ gulp.task('build-website', ['clean-website'], function() {
 			cp.execSync('npm install monaco-editor', {
 				cwd: path.join(__dirname, '../monaco-editor-website')
 			});
-			fs.unlink('../monaco-editor-website/package.json');
+			fs.unlinkSync('../monaco-editor-website/package.json');
 
 			this.emit('end');
 		}))
 	);
 
 });
+gulp.task('build-website', buildWebsiteTask);
 
-gulp.task('website', ['build-website'], function() {
+gulp.task('website', taskSeries(buildWebsiteTask, function() {
 	cp.execSync('git init', {
 		cwd: path.join(__dirname, '../monaco-editor-website')
 	});
@@ -687,10 +703,10 @@ gulp.task('website', ['build-website'], function() {
 	cp.execSync('git commit -m "Publish website"', {
 		cwd: path.join(__dirname, '../monaco-editor-website')
 	});
-	console.log('RUN monaco-editor-website>git push origin gh-pages --force')
-});
+	console.log('RUN monaco-editor-website>git push origin gh-pages --force');
+}));
 
-gulp.task('generate-test-samples', function() {
+const generateTestSamplesTask = function() {
 	var sampleNames = fs.readdirSync(path.join(__dirname, 'test/samples'));
 	var samples = sampleNames.map(function(sampleName) {
 		var samplePath = path.join(__dirname, 'test/samples', sampleName);
@@ -721,7 +737,6 @@ gulp.task('generate-test-samples', function() {
 			'<html>',
 			'<head>',
 			'	<base href="..">',
-			'	<meta http-equiv="X-UA-Compatible" content="IE=edge" />',
 			'	<meta http-equiv="Content-Type" content="text/html;charset=utf-8" />',
 			'</head>',
 			'<body>',
@@ -755,7 +770,7 @@ gulp.task('generate-test-samples', function() {
 			'',
 			js,
 			'',
-			'/*----------------------------------------SAMPLE CSS END*/',
+			'/*----------------------------------------SAMPLE JS END*/',
 			'});',
 			'</script>',
 			'</body>',
@@ -787,10 +802,25 @@ gulp.task('generate-test-samples', function() {
 		'</html>',
 	]
 	fs.writeFileSync(path.join(__dirname, 'test/playground.generated/index.html'), index.join('\n'));
-});
+};
 
-gulp.task('simpleserver', ['generate-test-samples'], function(cb) {
-	httpServer.createServer({ root: '../', cache: 5 }).listen(8080);
-	httpServer.createServer({ root: '../', cache: 5 }).listen(8088);
-	console.log('LISTENING on 8080 and 8088');
-});
+function createSimpleServer(rootDir, port) {
+	yaserver.createServer({
+		rootDir: rootDir
+	}).then((staticServer) => {
+		const server = http.createServer((request, response) => {
+			return staticServer.handle(request, response);
+		});
+		server.listen(port, '127.0.0.1', () => {
+			console.log(`Running at http://127.0.0.1:${port}`);
+		});
+	});
+}
+
+gulp.task('generate-test-samples', taskSeries(generateTestSamplesTask));
+
+gulp.task('simpleserver', taskSeries(generateTestSamplesTask, function() {
+	const SERVER_ROOT = path.normalize(path.join(__dirname, '../'));
+	createSimpleServer(SERVER_ROOT, 8080);
+	createSimpleServer(SERVER_ROOT, 8088);
+}));
